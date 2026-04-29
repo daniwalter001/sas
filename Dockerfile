@@ -1,24 +1,43 @@
-# Stremio Service v0.1.21 — built for Koyeb deployment
-# Koyeb injects $PORT; we forward it to stremio-service via --port flag
-# If stremio-service does not support --port, replace entrypoint with socat bridge:
-#   socat TCP-LISTEN:$PORT,fork TCP:127.0.0.1:11470
-# Koyeb exposes HTTPS automatically — no TLS config needed here
+# stremio-service — multi-stage build from source, targeting Koyeb deployment
+# Build deps: libgtk-3-dev, libayatana-appindicator3-dev, libssl-dev (required by tao/tray crates)
+# Runtime: same GTK/ayatana libs must be present — they are GUI libs but run without a display
+# Port 11470 is HARDCODED in the binary. socat bridges Koyeb's $PORT to it.
+# Koyeb terminates TLS — container serves plain HTTP, Koyeb URL exposes HTTPS.
+# Clone with: git clone --recurse-submodules https://github.com/Stremio/stremio-service
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim AS builder
 
-ARG STREMIO_SERVICE_URL=https://dl.strem.io/stremio-service/v0.1.21/stremio-service_amd64.deb
-ARG STREMIO_DEB=/tmp/stremio-service.deb
-
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl ca-certificates socat && \
-    curl -fsSL "$STREMIO_SERVICE_URL" -o "$STREMIO_DEB" && \
-    dpkg -i "$STREMIO_DEB" || apt-get install -f -y && \
-    rm -f "$STREMIO_DEB" && \
-    apt-get purge -y curl && \
-    apt-get autoremove -y && \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    pkg-config \
+    curl \
+    ca-certificates \
+    git \
+    libgtk-3-dev \
+    libssl-dev \
+    libayatana-appindicator3-dev && \
     rm -rf /var/lib/apt/lists/*
 
-RUN useradd -m -s /bin/bash stremio
+RUN curl https://sh.rustup.rs -sSf | sh -s -- -y --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /build
+RUN git clone --recurse-submodules https://github.com/Stremio/stremio-service .
+
+RUN cargo build --release
+
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgtk-3-0 \
+    libayatana-appindicator3-1 \
+    libssl3 \
+    socat \
+    ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN useradd -m -s /bin/sh stremio
+COPY --from=builder /build/target/release/stremio-service /usr/local/bin/stremio-service
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
